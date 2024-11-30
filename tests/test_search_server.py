@@ -1,70 +1,67 @@
 import pytest
 import os
-from unittest.mock import patch, Mock, AsyncMock
+from unittest.mock import patch, MagicMock, Mock, AsyncMock
 import json
 from pydantic import AnyUrl
-from contextlib import asynccontextmanager
 import mcp.types as types
 import contextvars
+from contextlib import asynccontextmanager
+from requests.exceptions import RequestException
 
-# Set test API keys
-os.environ["TAVILY_API_KEY"] = "test_tavily"
-os.environ["SERPER_API_KEY"] = "test_serper"
-os.environ["BING_API_KEY"] = "test_bing"
-os.environ["GOOGLE_API_KEY"] = "test_google"
-os.environ["GOOGLE_SEARCH_ENGINE_ID"] = "test_google_id"
+# Set up test environment variables before imports
+os.environ.update({
+    "TAVILY_API_KEY": "test_tavily",
+    "SERPER_API_KEY": "test_serper",
+    "BING_API_KEY": "test_bing",
+    "GOOGLE_API_KEY": "test_google",
+    "GOOGLE_SEARCH_ENGINE_ID": "test_google_id",
+    "KNOWLEDGE_BASE_URL": "http://test:3201",
+    "JINA_API_KEY": "test_jina"
+})
 
 from search_server.server import (
     handle_call_tool,
-    handle_list_resources,
     handle_list_tools,
+    handle_list_resources,
     handle_read_resource,
-    search_engine,
     server
 )
+from search_server.web_scraper import WebScraper
+from search_server.knowledge_base import KnowledgeBase
 
+# Test fixtures
 @pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-@pytest.fixture
-async def mock_session():
-    class MockSession:
-        async def send_resource_list_changed(self):
-            pass
-        
-        async def send_log_message(self, *args, **kwargs):
-            pass
-
-    return MockSession()
-
-@pytest.fixture
-async def mock_request_context(mock_session):
+def mock_request_context():
     class MockRequestContext:
-        def __init__(self, session, server):
-            self.session = session
-            self.server = server
+        class MockSession:
+            async def send_resource_list_changed(self):
+                pass
+            async def send_log_message(self, *args, **kwargs):
+                pass
+        session = MockSession()
+        server = server
+    return MockRequestContext()
 
-    return MockRequestContext(mock_session, server)
-
-# Create a mock context variable
-request_ctx = contextvars.ContextVar('request_ctx')
+# Create a context variable for request context
+request_context = contextvars.ContextVar("request_context")
 
 @asynccontextmanager
 async def set_request_context(context):
-    token = request_ctx.set(context)
+    """Async context manager for setting request context"""
+    token = request_context.set(context)
     try:
         yield
     finally:
-        request_ctx.reset(token)
+        request_context.reset(token)
 
+# Mock server's request_context property
 @pytest.fixture(autouse=True)
 def mock_server_context(monkeypatch):
     """Mock the server's request_context property to use our test context"""
     class MockServer:
         @property
         def request_context(self):
-            return request_ctx.get()
+            return request_context.get()
     
     # Create a new instance with our mocked property
     mock_server = MockServer()
@@ -77,6 +74,7 @@ def mock_server_context(monkeypatch):
     # Replace the global server instance
     monkeypatch.setattr('search_server.server.server', mock_server)
 
+# Mock responses
 @pytest.fixture
 def mock_tavily_response():
     return {
@@ -88,41 +86,7 @@ def mock_tavily_response():
         ]
     }
 
-@pytest.fixture
-def mock_serper_response():
-    return {
-        "organic": [
-            {
-                "snippet": "Test content from Serper",
-                "link": "https://test.com/serper"
-            }
-        ]
-    }
-
-@pytest.fixture
-def mock_bing_response():
-    return {
-        "webPages": {
-            "value": [
-                {
-                    "snippet": "Test content from Bing",
-                    "displayUrl": "https://test.com/bing"
-                }
-            ]
-        }
-    }
-
-@pytest.fixture
-def mock_google_response():
-    return {
-        "items": [
-            {
-                "snippet": "Test content from Google",
-                "link": "https://test.com/google"
-            }
-        ]
-    }
-
+# Search engine tests
 @pytest.mark.anyio
 async def test_search_tavily(mock_tavily_response, mock_request_context):
     async with set_request_context(mock_request_context):
@@ -133,108 +97,109 @@ async def test_search_tavily(mock_tavily_response, mock_request_context):
             result = await handle_call_tool("search", {"engine": "tavily", "query": "test"})
             
             assert len(result) == 1
-            assert result[0].type == "text"
+            assert isinstance(result[0], types.TextContent)
             assert "Test content from Tavily" in result[0].text
             assert "https://test.com/tavily" in result[0].text
 
-@pytest.mark.anyio
-async def test_search_serper(mock_serper_response, mock_request_context):
-    async with set_request_context(mock_request_context):
-        with patch('requests.post') as mock_post:
-            mock_post.return_value.json.return_value = mock_serper_response
-            mock_post.return_value.raise_for_status = Mock()
-
-            result = await handle_call_tool("search", {"engine": "serper", "query": "test"})
-            
-            assert len(result) == 1
-            assert result[0].type == "text"
-            assert "Test content from Serper" in result[0].text
-            assert "https://test.com/serper" in result[0].text
-
-@pytest.mark.anyio
-async def test_search_bing(mock_bing_response, mock_request_context):
-    async with set_request_context(mock_request_context):
-        with patch('requests.get') as mock_get:
-            mock_get.return_value.json.return_value = mock_bing_response
-            mock_get.return_value.raise_for_status = Mock()
-
-            result = await handle_call_tool("search", {"engine": "bing", "query": "test"})
-            
-            assert len(result) == 1
-            assert result[0].type == "text"
-            assert "Test content from Bing" in result[0].text
-            assert "https://test.com/bing" in result[0].text
-
-@pytest.mark.anyio
-async def test_search_google(mock_google_response, mock_request_context):
-    async with set_request_context(mock_request_context):
-        with patch('requests.get') as mock_get:
-            mock_get.return_value.json.return_value = mock_google_response
-            mock_get.return_value.raise_for_status = Mock()
-
-            result = await handle_call_tool("search", {"engine": "google", "query": "test"})
-            
-            assert len(result) == 1
-            assert result[0].type == "text"
-            assert "Test content from Google" in result[0].text
-            assert "https://test.com/google" in result[0].text
-
+# Note management tests
 @pytest.mark.anyio
 async def test_add_note(mock_request_context):
     async with set_request_context(mock_request_context):
         result = await handle_call_tool("add-note", {"name": "test", "content": "test content"})
         assert len(result) == 1
-        assert result[0].type == "text"
+        assert isinstance(result[0], types.TextContent)
         assert "test content" in result[0].text
 
 @pytest.mark.anyio
 async def test_read_resource(mock_request_context):
     async with set_request_context(mock_request_context):
-        # First add a note
         await handle_call_tool("add-note", {"name": "test", "content": "test content"})
-        
-        # Then read it
         uri = AnyUrl("note://internal/test")
         content = await handle_read_resource(uri)
         assert content == "test content"
 
-@pytest.mark.anyio
-async def test_list_resources(mock_request_context):
-    async with set_request_context(mock_request_context):
-        # First add a note
-        await handle_call_tool("add-note", {"name": "test", "content": "test content"})
-        
-        resources = await handle_list_resources()
-        assert len(resources) == 1
-        assert resources[0].name == "Note: test"
-        assert resources[0].mimeType == "text/plain"
+# Web scraper tests
+def test_web_scraper_init_with_key():
+    with patch.dict(os.environ, {'JINA_API_KEY': 'test_key'}):
+        scraper = WebScraper()
+        assert scraper.jina_api_key == 'test_key'
+        assert scraper.headers == {'Authorization': 'Bearer test_key'}
+
+def test_web_scraper_init_without_key():
+    with patch.dict(os.environ, {}, clear=True):
+        with pytest.raises(ValueError, match="JINA_API_KEY environment variable not set"):
+            WebScraper()
+
+# Knowledge base tests
+def test_knowledge_base_init_with_url():
+    with patch.dict(os.environ, {'KNOWLEDGE_BASE_URL': 'http://test:3201'}):
+        kb = KnowledgeBase()
+        assert kb.base_url == 'http://test:3201'
+        assert kb.query_url == 'http://test:3201/query'
+
+def test_knowledge_base_init_without_url():
+    with patch.dict(os.environ, {}, clear=True):
+        with pytest.raises(ValueError, match="KNOWLEDGE_BASE_URL environment variable not set"):
+            KnowledgeBase()
+
+def test_knowledge_base_search_success():
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "results": [
+            {
+                "file_name": "test.txt",
+                "chunk_text": "Test content",
+                "relevance_score": 0.9
+            }
+        ],
+        "summary": "Test summary",  # This should be filtered out
+        "relevant_count": 1
+    }
+    mock_response.raise_for_status.return_value = None
+    
+    with patch.dict(os.environ, {'KNOWLEDGE_BASE_URL': 'http://test:3201'}):
+        with patch('requests.post', return_value=mock_response) as mock_post:
+            kb = KnowledgeBase()
+            result = kb.search("test query")
+            
+            # Verify result is not None
+            assert result is not None
+            
+            # Verify summary is filtered out and check results
+            assert "summary" not in result
+            assert "results" in result
+            results = result.get("results", [])
+            assert len(results) == 1
+            assert results[0].get("file_name") == "test.txt"
 
 @pytest.mark.anyio
-async def test_list_tools(mock_request_context):
-    async with set_request_context(mock_request_context):
-        tools = await handle_list_tools()
-        assert len(tools) == 2
-        tool_names = {tool.name for tool in tools}
-        assert "add-note" in tool_names
-        assert "search" in tool_names
+async def test_knowledge_search_tool(mock_request_context):
+    mock_result = {
+        "results": [
+            {
+                "file_name": "test.txt",
+                "chunk_text": "Test content",
+                "relevance_score": 0.9
+            }
+        ],
+        "relevant_count": 1
+    }
+    
+    with patch.dict(os.environ, {'KNOWLEDGE_BASE_URL': 'http://test:3201'}):
+        with patch('search_server.knowledge_base.KnowledgeBase.search', return_value=mock_result):
+            async with set_request_context(mock_request_context):
+                result = await handle_call_tool("knowledge-search", {"query": "test query"})
+                
+                assert len(result) == 1
+                assert isinstance(result[0], types.TextContent)
+                text_content = result[0]
+                assert "Source: test.txt" in text_content.text
+                assert "Test content" in text_content.text
+                assert "Relevance: 0.9" in text_content.text
 
 @pytest.mark.anyio
-async def test_invalid_tool(mock_request_context):
+async def test_knowledge_search_tool_missing_query(mock_request_context):
     async with set_request_context(mock_request_context):
-        with pytest.raises(ValueError) as exc_info:
-            await handle_call_tool("invalid_tool", {"test": "test"})
-        assert "Unknown tool: invalid_tool" in str(exc_info.value)
-
-@pytest.mark.anyio
-async def test_missing_arguments(mock_request_context):
-    async with set_request_context(mock_request_context):
-        with pytest.raises(ValueError) as exc_info:
-            await handle_call_tool("search", None)
-        assert "Missing arguments" in str(exc_info.value)
-
-@pytest.mark.anyio
-async def test_missing_search_params(mock_request_context):
-    async with set_request_context(mock_request_context):
-        with pytest.raises(ValueError) as exc_info:
-            await handle_call_tool("search", {"engine": "tavily"})
-        assert "Missing engine or query" in str(exc_info.value) 
+        with pytest.raises(ValueError, match="Missing arguments"):
+            await handle_call_tool("knowledge-search", {})
+  

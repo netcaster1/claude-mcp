@@ -1,6 +1,5 @@
 import asyncio
-import logging
-from typing import Literal, Any
+from typing import Literal, Any, Dict
 
 from mcp.server.models import InitializationOptions
 import mcp.types as types
@@ -8,15 +7,24 @@ from mcp.server import NotificationOptions, Server
 from pydantic import AnyUrl
 import mcp.server.stdio
 from .search_engine import SearchEngine
-
-# Set up logging
-logger = logging.getLogger("search-server")
-logger.setLevel(logging.INFO)
+from .web_scraper import WebScraper
+from .knowledge_base import KnowledgeBase
+from .logger import logger
 
 # Store notes as a simple key-value dict to demonstrate state management
 notes: dict[str, str] = {}
 
 server = Server("search_server")
+
+# Initialize components
+try:
+    search_engine = SearchEngine()
+    web_scraper = WebScraper()
+    knowledge_base = KnowledgeBase()
+    logger.info("All components initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize components: {str(e)}")
+    raise
 
 @server.set_logging_level()
 async def set_logging_level(level: types.LoggingLevel) -> None:
@@ -27,14 +35,6 @@ async def set_logging_level(level: types.LoggingLevel) -> None:
         data=f"Log level set to {level}",
         logger="search-server"
     )
-
-# Initialize search engine
-try:
-    search_engine = SearchEngine()
-    logger.info("Search engine initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize search engine: {str(e)}")
-    raise
 
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
@@ -55,13 +55,13 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="search",
-            description="Search using specified engine",
+            description="Search internet using specified search engine",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "engine": {
                         "type": "string",
-                        "enum": ["tavily", "serper", "bing", "google"],
+                        "enum": ["tavily", "serper", "bing", "google", "linkup"],
                         "description": "Search engine to use"
                     },
                     "query": {
@@ -70,6 +70,34 @@ async def handle_list_tools() -> list[types.Tool]:
                     }
                 },
                 "required": ["engine", "query"],
+            },
+        ),
+        types.Tool(
+            name="scrape-url",
+            description="Scrape content from a URL",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL to scrape"
+                    }
+                },
+                "required": ["url"],
+            },
+        ),
+        types.Tool(
+            name="knowledge-search",
+            description="Search my knowledge base",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query for knowledge base"
+                    }
+                },
+                "required": ["query"],
             },
         )
     ]
@@ -84,7 +112,88 @@ async def handle_call_tool(
         raise ValueError("Missing arguments")
 
     try:
-        if name == "add-note":
+        if name == "knowledge-search":
+            query = arguments.get("query")
+            if not query:
+                logger.error("Missing query for knowledge search")
+                raise ValueError("Missing query")
+
+            logger.info(f"Searching knowledge base: {query}")
+            result = knowledge_base.search(query)
+            
+            if not result:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Failed to search knowledge base: Unknown error"
+                    )
+                ]
+
+            if "error" in result:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Failed to search knowledge base: {result['error']}"
+                    )
+                ]
+
+            # Format results
+            formatted_results = []
+            if "results" in result:
+                for item in result["results"]:
+                    formatted_results.append(
+                        types.TextContent(
+                            type="text",
+                            text=f"Source: {item.get('file_name', 'Unknown')}\n"
+                                 f"Content: {item.get('chunk_text', '')}\n"
+                                 f"Relevance: {item.get('relevance_score', 0)}\n"
+                        )
+                    )
+
+            if formatted_results:
+                return formatted_results
+            return [
+                types.TextContent(
+                    type="text",
+                    text="No results found in knowledge base"
+                )
+            ]
+
+        elif name == "scrape-url":
+            url = arguments.get("url")
+            if not url:
+                logger.error("Missing URL for web scraping")
+                raise ValueError("Missing URL")
+
+            logger.info(f"Scraping URL: {url}")
+            result = web_scraper.scrape_url(url)
+            
+            if not result:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Failed to scrape {url}: Unknown error"
+                    )
+                ]
+
+            if result.get('status') == 'success':
+                content = result.get('content', '')
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Successfully scraped content from {url}:\n\n{content}"
+                    )
+                ]
+            else:
+                error = result.get('error', 'Unknown error')
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Failed to scrape {url}: {error}"
+                    )
+                ]
+
+        elif name == "add-note":
             note_name = arguments.get("name")
             content = arguments.get("content")
 
@@ -171,10 +280,11 @@ async def main():
             write_stream,
             InitializationOptions(
                 server_name="search_server",
-                server_version="0.1.0",
+                server_version="1.3.3",
                 capabilities=server.get_capabilities(
                     notification_options=NotificationOptions(),
                     experimental_capabilities={},
-                ),
+                ),           
             ),
+            raise_exceptions=True,
         )

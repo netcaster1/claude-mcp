@@ -10,6 +10,7 @@ class SearchEngine:
         self.bing_api_key = os.getenv("BING_API_KEY")
         self.google_api_key = os.getenv("GOOGLE_API_KEY")
         self.google_search_engine_id = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
+        self.linkup_api_key = os.getenv("LINKUP_API_KEY")
 
     def search_tavily(self, query: str) -> List[Dict[str, Any]]:
         endpoint = "https://api.tavily.com/search"
@@ -120,6 +121,36 @@ class SearchEngine:
             print(f"Error in Google search: {e}")
             return []
 
+    def search_linkup(self, query: str) -> List[Dict[str, Any]]:
+        endpoint = "https://api.linkup.so/v1/search"
+        params = {
+            "q": query,
+            "depth": "standard",
+            "outputType": "searchResults"
+        }
+        headers = {
+            "Authorization": f"Bearer {self.linkup_api_key}"
+        }
+
+        try:
+            response = requests.get(endpoint, headers=headers, params=params)
+            response.raise_for_status()
+            search_results = response.json()
+
+            results = []
+            for result in search_results.get('results', []):
+                results.append({
+                    "file_name": "Linkup",
+                    "chunk_text": result.get('content'),
+                    "distance": 0.9,
+                    "search_type": "web",
+                    "url": result.get('url')
+                })
+            return results
+        except requests.exceptions.RequestException as e:
+            print(f"Error in Linkup search: {e}")
+            return []
+
     def search(self, engine: str, query: str) -> List[Dict[str, Any]]:
         if engine == "tavily":
             return self.search_tavily(query)
@@ -129,5 +160,7 @@ class SearchEngine:
             return self.search_bing(query)
         elif engine == "google":
             return self.search_google(query)
+        elif engine == "linkup":
+            return self.search_linkup(query)
         else:
             return [] 
