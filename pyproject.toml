@@ -31,7 +31,7 @@ filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::pytest.PytestDeprecationWarning",
 ]
-         
+             
 [tool.pytest-asyncio]
 default_fixture_loop_scope = "function"
 
@@ -45,7 +45,7 @@ exclude = [
 reportMissingImports = true
 reportOptionalSubscript = true
 pythonVersion = "3.10"
-
+  
 [dependency-groups]
 dev = [
     "pyright>=1.1.389",
@@ -54,11 +54,11 @@ dev = [
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.12.0",
 ]
-
+  
 [tool.coverage.run]
 source = ["src"]
 branch = true
-
+ 
 [tool.coverage.report]
 exclude_lines = [
     "pragma: no cover",
@@ -74,3 +74,4 @@ omit = [
     "tests/*",
     "setup.py",
 ]
+   

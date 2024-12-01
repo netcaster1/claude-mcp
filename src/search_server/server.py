@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import Literal, Any, Dict
 
 from mcp.server.models import InitializationOptions
@@ -128,9 +129,28 @@ async def handle_call_tool(
 
             logger.info(f"Searching knowledge base: {query}")
             try:
-                result = knowledge_base.search(query)
-                logger.info(f"Knowledge base response: {result}")
-                
+                # Test data instead of actual API call
+                # result = {
+                #     "results": [
+                #         {
+                #             "file_name": "test_file.txt",
+                #             "chunk_text": "This is a test content",
+                #             "distance": 0.82,
+                #             "search_type": "vector",
+                #             "relevance_score": 0.92
+                #         },
+                #         {
+                #             "file_name": "another_test.txt",
+                #             "chunk_text": "Another test content",
+                #             "distance": 0.75,
+                #             "search_type": "vector",
+                #             "relevance_score": 0.85
+                #         }
+                #     ]
+                # }
+                result = knowledge_base.search(query)  # Comment out real API call              
+                await server.request_context.session.send_resource_list_changed()
+                                
                 if not result or not isinstance(result, dict):
                     logger.error(f"Invalid response format: {result}")
                     return [
@@ -140,17 +160,6 @@ async def handle_call_tool(
                         )
                     ]
 
-                if "error" in result:
-                    error_msg = result.get('error', 'Unknown error')
-                    logger.error(f"Knowledge base error: {error_msg}")
-                    return [
-                        types.TextContent(
-                            type="text",
-                            text=f"Failed to search knowledge base: {error_msg}"
-                        )
-                    ]
-
-                # Format results
                 formatted_results = []
                 results = result.get("results", [])
                 logger.info(f"Processing {len(results)} results")
@@ -163,11 +172,7 @@ async def handle_call_tool(
                         )
                     ]
                 
-                for item in results:
-                    if not isinstance(item, dict):
-                        logger.warning(f"Skipping non-dict result: {item}")
-                        continue
-                        
+                for item in results:                       
                     text = (
                         f"Source: {item.get('file_name', 'Unknown')}\n"
                         f"Content: {item.get('chunk_text', '')}\n"
@@ -183,16 +188,10 @@ async def handle_call_tool(
                         )
                     )
 
+                
                 if formatted_results:
                     logger.info(f"Returning {len(formatted_results)} formatted results")
                     return formatted_results
-                
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="No valid results found in knowledge base"
-                    )
-                ]
 
             except Exception as e:
                 logger.error(f"Error processing knowledge base results: {str(e)}")
@@ -211,6 +210,7 @@ async def handle_call_tool(
 
             logger.info(f"Scraping URL: {url}")
             result = web_scraper.scrape_url(url)
+            await server.request_context.session.send_resource_list_changed()
             
             if not result:
                 return [
@@ -276,7 +276,7 @@ async def handle_call_tool(
                         text=f"Source: {result['file_name']}\nURL: {result['url']}\nContent: {result['chunk_text']}\n"
                     )
                 )
-            
+            await server.request_context.session.send_resource_list_changed()            
             return formatted_results
 
         else:
