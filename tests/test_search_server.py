@@ -142,7 +142,8 @@ def test_knowledge_base_init_without_url():
         with pytest.raises(ValueError, match="KNOWLEDGE_BASE_URL environment variable not set"):
             KnowledgeBase()
 
-def test_knowledge_base_search_success():
+@pytest.mark.anyio
+async def test_knowledge_base_search_success():
     mock_response = MagicMock()
     mock_response.json.return_value = {
         "results": [
@@ -158,9 +159,13 @@ def test_knowledge_base_search_success():
     mock_response.raise_for_status.return_value = None
     
     with patch.dict(os.environ, {'KNOWLEDGE_BASE_URL': 'http://test:3201'}):
-        with patch('requests.post', return_value=mock_response) as mock_post:
+        with patch('httpx.AsyncClient') as MockClient:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            MockClient.return_value.__aenter__.return_value = mock_client
+            
             kb = KnowledgeBase()
-            result = kb.search("test query")
+            result = await kb.search("test query")
             
             # Verify result is not None
             assert result is not None
@@ -186,7 +191,9 @@ async def test_knowledge_search_tool(mock_request_context):
     }
     
     with patch.dict(os.environ, {'KNOWLEDGE_BASE_URL': 'http://test:3201'}):
-        with patch('search_server.knowledge_base.KnowledgeBase.search', return_value=mock_result):
+        with patch('search_server.knowledge_base.KnowledgeBase.search', 
+                  new_callable=AsyncMock, 
+                  return_value=mock_result):
             async with set_request_context(mock_request_context):
                 result = await handle_call_tool("knowledge-search", {"query": "test query"})
                 

@@ -40,30 +40,28 @@ class KnowledgeBase:
                 "threshold": 3,
                 "full_docs_search": True,
                 "rerank_method": "jina",
-                "file_name": "claude-mcp-call",
+                "file_name": "claude-mcp-call", 
                 "contextual_embedding_query": True,
                 "search_engine": "linkup"
             }
             
             response = self.session.post(self.query_url, json=payload, timeout=30)
             response.raise_for_status()
-            
             result = response.json()
-            # Filter out summary as requested
-            if "summary" in result:
-                del result["summary"]
-                
-            return result
+            
+            return {"results": result.get("results", [])}
             
         except requests.Timeout:
             logger.error("Knowledge base search timed out")
             return {
                 "error": "Request timed out",
-                "status": "failed"
+                "status": "failed", 
+                "results": []
             }
         except requests.RequestException as e:
             logger.error(f"Failed to search knowledge base: {str(e)}")
             return {
                 "error": str(e),
-                "status": "failed"
+                "status": "failed",
+                "results": []
             } 

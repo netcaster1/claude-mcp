@@ -6,6 +6,7 @@ dist/
 wheels/
 notepad/
 .pytest_cache/
+python-sdk/
 
 *.egg-info
 .env

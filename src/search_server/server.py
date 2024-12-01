@@ -10,6 +10,14 @@ from .search_engine import SearchEngine
 from .web_scraper import WebScraper
 from .knowledge_base import KnowledgeBase
 from .logger import logger
+import anyio
+import click
+import uvicorn
+from starlette.applications import Starlette
+from starlette.routing import Route
+from mcp.server.sse import SseServerTransport
+import os
+from dotenv import load_dotenv
 
 # Store notes as a simple key-value dict to demonstrate state management
 notes: dict[str, str] = {}
@@ -119,45 +127,81 @@ async def handle_call_tool(
                 raise ValueError("Missing query")
 
             logger.info(f"Searching knowledge base: {query}")
-            result = knowledge_base.search(query)
-            
-            if not result:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Failed to search knowledge base: Unknown error"
-                    )
-                ]
+            try:
+                result = knowledge_base.search(query)
+                logger.info(f"Knowledge base response: {result}")
+                
+                if not result or not isinstance(result, dict):
+                    logger.error(f"Invalid response format: {result}")
+                    return [
+                        types.TextContent(
+                            type="text",
+                            text="Invalid response from knowledge base"
+                        )
+                    ]
 
-            if "error" in result:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Failed to search knowledge base: {result['error']}"
-                    )
-                ]
+                if "error" in result:
+                    error_msg = result.get('error', 'Unknown error')
+                    logger.error(f"Knowledge base error: {error_msg}")
+                    return [
+                        types.TextContent(
+                            type="text",
+                            text=f"Failed to search knowledge base: {error_msg}"
+                        )
+                    ]
 
-            # Format results
-            formatted_results = []
-            if "results" in result:
-                for item in result["results"]:
+                # Format results
+                formatted_results = []
+                results = result.get("results", [])
+                logger.info(f"Processing {len(results)} results")
+                
+                if not results:
+                    return [
+                        types.TextContent(
+                            type="text",
+                            text="No results found in knowledge base"
+                        )
+                    ]
+                
+                for item in results:
+                    if not isinstance(item, dict):
+                        logger.warning(f"Skipping non-dict result: {item}")
+                        continue
+                        
+                    text = (
+                        f"Source: {item.get('file_name', 'Unknown')}\n"
+                        f"Content: {item.get('chunk_text', '')}\n"
+                        f"Distance: {item.get('distance', 'N/A')}\n"
+                        f"Search Type: {item.get('search_type', 'N/A')}\n"
+                        f"Relevance: {item.get('relevance_score', 'N/A')}\n"
+                    )
+                    
                     formatted_results.append(
                         types.TextContent(
                             type="text",
-                            text=f"Source: {item.get('file_name', 'Unknown')}\n"
-                                 f"Content: {item.get('chunk_text', '')}\n"
-                                 f"Relevance: {item.get('relevance_score', 0)}\n"
+                            text=text
                         )
                     )
 
-            if formatted_results:
-                return formatted_results
-            return [
-                types.TextContent(
-                    type="text",
-                    text="No results found in knowledge base"
-                )
-            ]
+                if formatted_results:
+                    logger.info(f"Returning {len(formatted_results)} formatted results")
+                    return formatted_results
+                
+                return [
+                    types.TextContent(
+                        type="text",
+                        text="No valid results found in knowledge base"
+                    )
+                ]
+
+            except Exception as e:
+                logger.error(f"Error processing knowledge base results: {str(e)}")
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error processing results: {str(e)}"
+                    )
+                ]
 
         elif name == "scrape-url":
             url = arguments.get("url")
@@ -272,19 +316,86 @@ async def handle_read_resource(uri: AnyUrl) -> str:
         return notes[name]
     raise ValueError(f"Note not found: {name}")
 
-async def main():
-    logger.info("Starting search server")
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="search_server",
-                server_version="1.3.3",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),           
-            ),
-            raise_exceptions=True,
+# Load environment variables
+load_dotenv()
+
+required_env_vars = [
+    "TAVILY_API_KEY",
+    "SERPER_API_KEY", 
+    "BING_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_SEARCH_ENGINE_ID",
+    "JINA_API_KEY",
+    "KNOWLEDGE_BASE_URL",
+    "LINKUP_API_KEY"
+]
+
+for var in required_env_vars:
+    if not os.getenv(var):
+        raise ValueError(f"Missing required environment variable: {var}")
+
+@click.command()
+@click.option("--port", default=8509, help="Port to listen on for SSE")
+@click.option(
+    "--transport",
+    type=click.Choice(["stdio", "sse"]),
+    default="stdio",
+    help="Transport type",
+)
+def main(port: int, transport: str) -> int:
+    if transport == "sse":
+        sse = SseServerTransport("/messages")
+
+        async def handle_sse(request):
+            async with sse.connect_sse(
+                request.scope, request.receive, request._send
+            ) as streams:
+                await server.run(
+                    streams[0],
+                    streams[1],
+                    InitializationOptions(
+                        server_name="search_server",
+                        server_version="1.3.3",
+                        capabilities=server.get_capabilities(
+                            notification_options=NotificationOptions(),
+                            experimental_capabilities={},
+                        ),
+                    ),
+                )
+
+        async def handle_messages(request):
+            await sse.handle_post_message(request.scope, request.receive, request._send)
+
+        starlette_app = Starlette(
+            debug=True,
+            routes=[
+                Route("/sse", endpoint=handle_sse),
+                Route("/messages", endpoint=handle_messages, methods=["POST"]),
+            ],
         )
+
+        logger.info(f"Starting SSE server on port {port}")
+        uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+    else:
+        async def arun():
+            async with mcp.server.stdio.stdio_server() as streams:
+                await server.run(
+                    streams[0],
+                    streams[1],
+                    InitializationOptions(
+                        server_name="search_server",
+                        server_version="1.3.3",
+                        capabilities=server.get_capabilities(
+                            notification_options=NotificationOptions(),
+                            experimental_capabilities={},
+                        ),
+                    ),
+                )
+
+        logger.info("Starting stdio server")
+        anyio.run(arun)
+
+    return 0
+
+if __name__ == "__main__":
+    main()

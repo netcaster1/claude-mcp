@@ -14,7 +14,7 @@ requires-python = ">=3.10"
 
 [project.scripts]
 search-server = "search_server:main"
-
+  
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
