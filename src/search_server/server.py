@@ -12,6 +12,7 @@ from .web_scraper import WebScraper
 from .knowledge_base import KnowledgeBase
 from .logger import logger
 import anyio
+from exceptiongroup import ExceptionGroup, catch
 import click
 import uvicorn
 from starlette.applications import Starlette
@@ -19,6 +20,7 @@ from starlette.routing import Route
 from mcp.server.sse import SseServerTransport
 import os
 from dotenv import load_dotenv
+import json
 
 # Store notes as a simple key-value dict to demonstrate state management
 notes: dict[str, str] = {}
@@ -125,34 +127,20 @@ async def handle_call_tool(
             query = arguments.get("query")
             if not query:
                 logger.error("Missing query for knowledge search")
-                raise ValueError("Missing query")
+                return [
+                    types.TextContent(
+                        type="text",
+                        text="Missing query parameter"
+                    )
+                ]
 
             logger.info(f"Searching knowledge base: {query}")
             try:
-                # Test data instead of actual API call
-                # result = {
-                #     "results": [
-                #         {
-                #             "file_name": "test_file.txt",
-                #             "chunk_text": "This is a test content",
-                #             "distance": 0.82,
-                #             "search_type": "vector",
-                #             "relevance_score": 0.92
-                #         },
-                #         {
-                #             "file_name": "another_test.txt",
-                #             "chunk_text": "Another test content",
-                #             "distance": 0.75,
-                #             "search_type": "vector",
-                #             "relevance_score": 0.85
-                #         }
-                #     ]
-                # }
-                result = knowledge_base.search(query)  # Comment out real API call              
-                await server.request_context.session.send_resource_list_changed()
-                                
-                if not result or not isinstance(result, dict):
-                    logger.error(f"Invalid response format: {result}")
+                result = knowledge_base.search(query)
+                
+                # Ensure we have a valid result structure
+                if not isinstance(result, dict):
+                    logger.error(f"Invalid response type: {type(result)}")
                     return [
                         types.TextContent(
                             type="text",
@@ -160,45 +148,56 @@ async def handle_call_tool(
                         )
                     ]
 
-                formatted_results = []
+                # Get results array, defaulting to empty list if not present
                 results = result.get("results", [])
-                logger.info(f"Processing {len(results)} results")
-                
-                if not results:
+                if not isinstance(results, list):
+                    logger.error(f"Invalid results type: {type(results)}")
                     return [
                         types.TextContent(
                             type="text",
-                            text="No results found in knowledge base"
+                            text="Invalid results format from knowledge base"
                         )
                     ]
-                
-                for item in results:                       
-                    text = (
-                        f"Source: {item.get('file_name', 'Unknown')}\n"
-                        f"Content: {item.get('chunk_text', '')}\n"
-                        f"Distance: {item.get('distance', 'N/A')}\n"
-                        f"Search Type: {item.get('search_type', 'N/A')}\n"
-                        f"Relevance: {item.get('relevance_score', 'N/A')}\n"
-                    )
-                    
-                    formatted_results.append(
-                        types.TextContent(
-                            type="text",
-                            text=text
-                        )
-                    )
 
-                
+                # Format results
+                formatted_results = []
+                for item in results:
+                    try:
+                        if not isinstance(item, dict):
+                            continue
+                            
+                        formatted_results.append(
+                            types.TextContent(
+                                type="text",
+                                text=(
+                                    f"Source: {str(item.get('file_name', 'Unknown'))}\n"
+                                    f"Content: {str(item.get('chunk_text', ''))}\n"
+                                    f"Distance: {str(item.get('distance', 'N/A'))}\n"
+                                    f"Search Type: {str(item.get('search_type', 'N/A'))}\n"
+                                    f"Relevance: {str(item.get('relevance_score', 'N/A'))}\n"
+                                )
+                            )
+                        )
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Failed to format result item: {e}")
+                        continue
+
                 if formatted_results:
-                    logger.info(f"Returning {len(formatted_results)} formatted results")
                     return formatted_results
 
-            except Exception as e:
-                logger.error(f"Error processing knowledge base results: {str(e)}")
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error processing results: {str(e)}"
+                        text="No results found in knowledge base"
+                    )
+                ]
+
+            except Exception as e:
+                logger.error(f"Knowledge base search failed: {str(e)}")
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Search failed: {str(e)}"
                     )
                 ]
 
@@ -334,6 +333,113 @@ for var in required_env_vars:
     if not os.getenv(var):
         raise ValueError(f"Missing required environment variable: {var}")
 
+def value_type_error_handler(exc_group: ExceptionGroup) -> None:
+    """Handle exception group errors synchronously"""
+    error_messages = []
+    for exc in exc_group.exceptions:
+        error_messages.append(str(exc))
+    
+    # Create a proper MCP notification without id field
+    error_message = {
+        "jsonrpc": "2.0",
+        "method": "notifications/error",
+        "params": {
+            "code": -32603,  # Internal error code
+            "message": "Internal server error",
+            "data": {
+                "details": error_messages
+            }
+        }
+    }
+    print(json.dumps(error_message))
+    raise exc_group
+
+async def run_stdio_server():
+    """Run the stdio server with error handling"""
+    with catch({
+        (ValueError, TypeError): value_type_error_handler,
+    }):
+        async with mcp.server.stdio.stdio_server() as streams:
+            await server.run(
+                streams[0],
+                streams[1],
+                InitializationOptions(
+                    server_name="search_server",
+                    server_version="1.3.4",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
+                ),
+            )
+
+async def retry_runner():
+    retry_count = 0
+    max_retries = 3
+    retry_delay = 1  # Initial delay in seconds
+
+    while retry_count < max_retries:
+        try:
+            await run_stdio_server()
+            break  # Exit loop if successful
+        except Exception as e:
+            retry_count += 1
+            if retry_count < max_retries:
+                # Format as proper MCP notification without id
+                error_message = {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {
+                        "progressToken": str(retry_count),
+                        "progress": retry_count,
+                        "total": max_retries,
+                        "message": f"Retry {retry_count}/{max_retries}: {str(e)}"
+                    }
+                }
+                print(json.dumps(error_message))
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                # Final error as MCP notification without id
+                error_message = {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/error",
+                    "params": {
+                        "code": -32603,
+                        "message": "Max retries reached",
+                        "data": {
+                            "error": str(e),
+                            "retries": retry_count
+                        }
+                    }
+                }
+                print(json.dumps(error_message))
+                raise  # Re-raise the final exception
+
+def run_with_retries():
+    """Run the server with outer retries"""
+    outer_retry_count = 0
+    outer_max_retries = 3
+    outer_retry_delay = 5  # Initial delay for outer retry
+
+    while outer_retry_count < outer_max_retries:
+        try:
+            anyio.run(retry_runner)
+            break  # If successful, exit the loop
+        except Exception as e:
+            outer_retry_count += 1
+            logger.error(f"Outer retry {outer_retry_count}/{outer_max_retries}: {e}")
+            
+            if outer_retry_count >= outer_max_retries:
+                logger.error("Max outer retries reached, exiting...")
+                return 1
+                
+            logger.info(f"Outer retry in {outer_retry_delay} seconds...")
+            time.sleep(outer_retry_delay)  # Use time.sleep for outer loop
+            outer_retry_delay = min(outer_retry_delay * 2, 60)  # Max 60 seconds
+    
+    return 0
+
 @click.command()
 @click.option("--port", default=8509, help="Port to listen on for SSE")
 @click.option(
@@ -355,7 +461,7 @@ def main(port: int, transport: str) -> int:
                     streams[1],
                     InitializationOptions(
                         server_name="search_server",
-                        server_version="1.3.3",
+                        server_version="1.3.4",
                         capabilities=server.get_capabilities(
                             notification_options=NotificationOptions(),
                             experimental_capabilities={},
@@ -377,25 +483,8 @@ def main(port: int, transport: str) -> int:
         logger.info(f"Starting SSE server on port {port}")
         uvicorn.run(starlette_app, host="0.0.0.0", port=port)
     else:
-        async def arun():
-            async with mcp.server.stdio.stdio_server() as streams:
-                await server.run(
-                    streams[0],
-                    streams[1],
-                    InitializationOptions(
-                        server_name="search_server",
-                        server_version="1.3.3",
-                        capabilities=server.get_capabilities(
-                            notification_options=NotificationOptions(),
-                            experimental_capabilities={},
-                        ),
-                    ),
-                )
-
         logger.info("Starting stdio server")
-        anyio.run(arun)
-
-    return 0
+        return run_with_retries()
 
 if __name__ == "__main__":
     main()

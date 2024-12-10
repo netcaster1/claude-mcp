@@ -1,6 +1,7 @@
 import requests
 import os
 import time
+import json
 from typing import Optional, Dict, Any, List
 from .logger import logger
 from requests.adapters import HTTPAdapter
@@ -25,13 +26,23 @@ class KnowledgeBase:
 
     def normalize_result(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize a single result item to ensure consistent format"""
-        return {
-            "file_name": str(item.get("file_name", "Unknown")),
-            "chunk_text": str(item.get("chunk_text", "")),
-            "distance": float(item.get("distance", 0.0)),
-            "search_type": str(item.get("search_type", "vector")),
-            "relevance_score": float(item.get("relevance_score", 0.0))
-        }
+        try:
+            return {
+                "file_name": str(item.get("file_name", "Unknown")).encode('utf-8').decode('utf-8'),
+                "chunk_text": str(item.get("chunk_text", "")).encode('utf-8').decode('utf-8'),
+                "distance": float(item.get("distance", 0.0)),
+                "search_type": str(item.get("search_type", "vector")).encode('utf-8').decode('utf-8'),
+                "relevance_score": float(item.get("relevance_score", 0.0))
+            }
+        except UnicodeError as e:
+            logger.error(f"Unicode encoding error in result: {e}")
+            return {
+                "file_name": "Unknown",
+                "chunk_text": "Error: Invalid character encoding in result",
+                "distance": 0.0,
+                "search_type": "vector",
+                "relevance_score": 0.0
+            }
 
     def search(self, query: str) -> Dict[str, List[Dict[str, Any]]]:
         """
@@ -44,8 +55,11 @@ class KnowledgeBase:
             Dict containing the search results with consistent format
         """
         try:
+            # Ensure query is properly encoded
+            encoded_query = query.encode('utf-8').decode('utf-8')
+            
             payload = {
-                "query": query,
+                "query": encoded_query,
                 "k": 5,
                 "llm": "claude",
                 "threshold": 3,
@@ -58,7 +72,9 @@ class KnowledgeBase:
             
             response = self.session.post(self.query_url, json=payload, timeout=30)
             response.raise_for_status()
-            result = response.json()
+            
+            # Decode response with explicit UTF-8 encoding
+            result = json.loads(response.content.decode('utf-8'))
             
             # Get raw results
             raw_results = result.get("results", [])
@@ -73,16 +89,22 @@ class KnowledgeBase:
                     if isinstance(item, dict):
                         normalized_item = self.normalize_result(item)
                         normalized_results.append(normalized_item)
-                except (ValueError, TypeError) as e:
+                except (ValueError, TypeError, UnicodeError) as e:
                     logger.warning(f"Failed to normalize result item: {e}")
                     continue
 
             logger.info(f"Normalized {len(normalized_results)} results")
             return {"results": normalized_results}
-            
+
         except requests.Timeout:
             logger.error("Knowledge base search timed out")
             return {"results": []}
         except requests.RequestException as e:
             logger.error(f"Failed to search knowledge base: {str(e)}")
+            return {"results": []}
+        except UnicodeError as e:
+            logger.error(f"Unicode encoding error: {str(e)}")
+            return {"results": []}
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {str(e)}")
             return {"results": []} 
