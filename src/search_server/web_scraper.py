@@ -5,7 +5,7 @@ from .logger import logger
 
 class WebScraper:
     def __init__(self):
-        self.jina_api_key = os.getenv("JINA_API_KEY")
+        self.jina_api_key = os.getenv("JINA_API_KEY", "jina_api_key")
         if not self.jina_api_key:
             logger.error("JINA_API_KEY environment variable not set")
             raise ValueError("JINA_API_KEY environment variable not set")

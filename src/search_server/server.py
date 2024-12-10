@@ -70,7 +70,7 @@ async def handle_list_tools() -> list[types.Tool]:
                 "properties": {
                     "engine": {
                         "type": "string",
-                        "enum": ["tavily", "serper", "bing", "google", "linkup"],
+                        "enum": ["tavily", "serper", "bing", "google", "linkup", "exa"],
                         "description": "Search engine to use"
                     },
                     "query": {

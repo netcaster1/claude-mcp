@@ -8,7 +8,7 @@ from urllib3.util.retry import Retry
 
 class KnowledgeBase:
     def __init__(self):
-        self.base_url = os.getenv("KNOWLEDGE_BASE_URL")
+        self.base_url = os.getenv("KNOWLEDGE_BASE_URL", "http://192.168.0.16:3201")
         if not self.base_url:
             logger.error("KNOWLEDGE_BASE_URL environment variable not set")
             raise ValueError("KNOWLEDGE_BASE_URL environment variable not set")

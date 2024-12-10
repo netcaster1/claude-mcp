@@ -5,13 +5,14 @@ from typing import List, Dict, Any
 
 class SearchEngine:
     def __init__(self):
-        self.tavily_api_key = os.getenv("TAVILY_API_KEY")
-        self.serper_api_key = os.getenv("SERPER_API_KEY")
-        self.bing_api_key = os.getenv("BING_API_KEY")
-        self.google_api_key = os.getenv("GOOGLE_API_KEY")
-        self.google_search_engine_id = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
-        self.linkup_api_key = os.getenv("LINKUP_API_KEY")
-
+        self.tavily_api_key = os.getenv("TAVILY_API_KEY", "tavily_api_key")
+        self.serper_api_key = os.getenv("SERPER_API_KEY", "serper_api_key")
+        self.bing_api_key = os.getenv("BING_API_KEY", "bing_api_key")
+        self.google_api_key = os.getenv("GOOGLE_API_KEY", "google_api_key")
+        self.google_search_engine_id = os.getenv("GOOGLE_SEARCH_ENGINE_ID", "google_search_engine_id")
+        self.linkup_api_key = os.getenv("LINKUP_API_KEY", "linkup_api_key")
+        self.exa_api_key = os.getenv("EXA_API_KEY", "exa_api_key")
+        
     def search_tavily(self, query: str) -> List[Dict[str, Any]]:
         endpoint = "https://api.tavily.com/search"
         payload = {
@@ -151,6 +152,43 @@ class SearchEngine:
             print(f"Error in Linkup search: {e}")
             return []
 
+    def search_exa(self, query: str) -> List[Dict[str, Any]]:
+        endpoint = "https://api.exa.ai/search"
+        headers = {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "x-api-key": self.exa_api_key
+        }
+        data = {
+            "query": query,
+            "type": "auto",
+            "useAutoprompt": True,
+            "numResults": 10,
+            "contents": {
+                "summary": True
+            }
+        }
+
+        try:
+            response = requests.post(endpoint, headers=headers, json=data)
+            response.raise_for_status()
+            search_results = response.json()
+
+            results = []
+            for result in search_results.get('results', []):
+                results.append({
+                    "file_name": "Exa",
+                    "chunk_text": result.get('summary'),
+                    "distance": 0.9,
+                    "search_type": "web",
+                    "url": result.get('url')
+                })
+            return results
+        except requests.exceptions.RequestException as e:
+            print(f"Error in Exa search: {e}")
+            return []
+
+
     def search(self, engine: str, query: str) -> List[Dict[str, Any]]:
         if engine == "tavily":
             return self.search_tavily(query)
@@ -162,5 +200,7 @@ class SearchEngine:
             return self.search_google(query)
         elif engine == "linkup":
             return self.search_linkup(query)
+        elif engine == "exa":
+            return self.search_exa(query)
         else:
             return [] 
